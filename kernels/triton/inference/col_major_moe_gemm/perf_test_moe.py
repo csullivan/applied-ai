@@ -81,7 +81,7 @@ if __name__ == '__main__':
     triton.testing.Benchmark(
         x_names=['m'],  # Argument names to use as an x-axis for the plot
         x_vals=[
-            2**i for i in range(0, 10)
+            2**i for i in [4]  # range(0, 10)
         ],  # Different possible values for `x_name`
         line_arg='provider',  # Argument name whose value corresponds to a different line in the plot
         # Possible values for `line_arg`
@@ -116,10 +116,18 @@ if __name__ == '__main__':
         topk_weight, topk_ids = torch.topk(score, topk)
 
         quantiles = [0.5, 0.2, 0.8]
-        if provider == 'cm':
-            ms, min_ms, max_ms = triton.testing.do_bench(lambda: fused_moe_col(a, w1, w2, topk_weight, topk_ids, False), quantiles=quantiles)
-        if provider == 'gl':
-            ms, min_ms, max_ms = triton.testing.do_bench(lambda: fused_moe_grouped(a, w1, w2, topk_weight, topk_ids, False), quantiles=quantiles)
+        if provider == "cm":
+            w1_f8 = w1.to(torch.float8_e4m3fn)
+            w2_f8 = w2.to(torch.float8_e4m3fn)
+            ms, min_ms, max_ms = triton.testing.do_bench(
+                lambda: fused_moe_col(a, w1_f8, w2_f8, topk_weight, topk_ids, False),
+                quantiles=quantiles,
+            )
+        if provider == "gl":
+            ms, min_ms, max_ms = triton.testing.do_bench(
+                lambda: fused_moe_grouped(a, w1, w2, topk_weight, topk_ids, False),
+                quantiles=quantiles,
+            )
         perf = lambda ms: 2 * m * n * k * 1e-12 / (ms * 1e-3)
         return perf(ms), perf(max_ms), perf(min_ms)
 

@@ -189,6 +189,19 @@ def invoke_fused_moe_kernel(A: torch.Tensor, B: torch.Tensor, C: torch.Tensor,
     N = B.shape[1]
 
     grid = lambda META: (triton.cdiv(EM, META['block_m']) * triton.cdiv(N, META['block_n']), )
+    A = A.to(torch.float8_e4m3fn)
+
+    compute_type = tl.float16
+    if A.dtype == torch.bfloat16:
+        compute_type = tl.bfloat16
+    elif A.dtype == torch.float8_e4m3fn:
+        compute_type = tl.float8e4nv
+        assert B.dtype == torch.float8_e4m3fn
+    else:
+        raise NotImplementedError(
+            f"TODO(csullivan): Compute type needs to be added: {str(A.dtype)}"
+        )
+
     fused_moe_kernel[grid](
         A,
         B,
@@ -212,9 +225,15 @@ def invoke_fused_moe_kernel(A: torch.Tensor, B: torch.Tensor, C: torch.Tensor,
         sorted_token_ids.stride(0),
         MUL_ROUTED_WEIGHT=mul_routed_weight,
         top_k=top_k,
-        compute_type=tl.bfloat16 if A.dtype == torch.bfloat16 else tl.float16,
+        compute_type=compute_type,
         **config,
     )
+    # import ipdb
+
+    # ipdb.set_trace()
+    # print(dir(fused_moe_kernel.cache))
+    # with open("fused_moe_kernel_e4m3.ptx", "w") as a:
+    #     print(list(fused_moe_kernel.cache[0].values())[0].asm["ptx"], file=a)
 
 
 def fused_moe(hidden_states: torch.Tensor,
@@ -258,6 +277,21 @@ def fused_moe(hidden_states: torch.Tensor,
             'block_n': 32,
             'block_k': 64,
         }
+
+    # TODO(csullivan): Hardcoded config for MMAv2 FP8 (Ada)
+    # Best WGMMA (v3) config
+    # config = {
+    #     "block_m": 64,
+    #     "block_n": 16,
+    #     "block_k": 128,
+    # }
+    # Best MMA (v2) config
+    config = {
+        "block_m": 16,
+        "block_n": 16,
+        "block_k": 128,
+    }
+    print(2112, config)
 
     intermediate_cache1 = torch.empty((M, topk_ids.shape[1], N),
                                       device=hidden_states.device,
