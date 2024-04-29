@@ -99,6 +99,7 @@ if __name__ == '__main__':
     def benchmark(m, provider):
 
         m = m
+        # n = 4096//2
         n = 14336//2
         k = 4096
         e = 8
@@ -119,6 +120,8 @@ if __name__ == '__main__':
         if provider == "cm":
             w1_f8 = w1.to(torch.float8_e4m3fn)
             w2_f8 = w2.to(torch.float8_e4m3fn)
+            # w1_f8 = torch.permute(w1_f8, (0, 2, 1))
+            # w2_f8 = torch.permute(w2_f8, (0, 2, 1))
             ms, min_ms, max_ms = triton.testing.do_bench(
                 lambda: fused_moe_col(a, w1_f8, w2_f8, topk_weight, topk_ids, False),
                 quantiles=quantiles,
