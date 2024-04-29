@@ -61,6 +61,7 @@ def fused_moe_kernel(
     MUL_ROUTED_WEIGHT: tl.constexpr,
     top_k: tl.constexpr,
     compute_type: tl.constexpr,
+    fp8_fast_accum=False, 
 ):
     """
     Implements the fused computation for a Mixture of Experts (MOE) using token and expert matrices.
@@ -112,7 +113,7 @@ def fused_moe_kernel(
                     mask=offs_k[:, None] < K - k * block_k,
                     other=0.0)
         # We accumulate along the K dimension.
-        accumulator += tl.dot(a, b)
+        accumulator = tl.dot(a, b, accumulator, out_dtype=tl.float32)
         # Advance the ptrs to the next K block.
         a_ptrs += block_k * stride_ak
         b_ptrs += block_k * stride_bk
@@ -226,6 +227,7 @@ def invoke_fused_moe_kernel(A: torch.Tensor, B: torch.Tensor, C: torch.Tensor,
         MUL_ROUTED_WEIGHT=mul_routed_weight,
         top_k=top_k,
         compute_type=compute_type,
+        fp8_fast_accum=True, 
         **config,
     )
     # import ipdb
