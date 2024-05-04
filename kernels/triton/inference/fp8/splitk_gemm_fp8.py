@@ -89,16 +89,17 @@ def gemm_split_k_kernel(a_ptr, b_ptr, c_ptr,
 
 def gemm_split_k(a, b):
 
+def gemm_split_k(a, b, c):
     m, k = a.shape
     _, n = b.shape
-    
-    block_m = 64
-    block_n = 64
+
+    block_m = 16
+    block_n = 32
     block_k = 512
     num_stages = 3
     num_warps = 8
-    split_k = 4
-    group_m = 8
+    split_k = 2
+    group_m = 1
 
     total_blocks_m = triton.cdiv(m, block_m)
     total_blocks_n = triton.cdiv(n, block_n)
@@ -113,29 +114,67 @@ def gemm_split_k(a, b):
 
     # print(f"total thread blocks k: {k}, total thread blocks m and total thread blocks n = {total_blocks_m=} x {total_blocks_n} = {total_programs_mn}")
     # print(f"{total_programs_mn=}, {total_programs_k=}")
-    
-    c = torch.zeros((m, n), device=a.device, dtype=torch.float16)
-    k = gemm_split_k_kernel[grid](a, b, c,
-                              a.stride(0), a.stride(1),
-                              b.stride(0), b.stride(1),
-                              c.stride(0), c.stride(1),
-                              m, n, k,
-                              block_m, block_n, block_k,
-                              split_k, group_m, num_stages=num_stages, num_warps=num_warps)
-    
+
+    k = gemm_split_k_kernel[grid](
+        a,
+        b,
+        c,
+        a.stride(0),
+        a.stride(1),
+        b.stride(0),
+        b.stride(1),
+        c.stride(0),
+        c.stride(1),
+        m,
+        n,
+        k,
+        block_m,
+        block_n,
+        block_k,
+        split_k,
+        group_m,
+        num_stages=num_stages,
+        num_warps=num_warps,
+    )
+
     # print(f"{k.n_regs} registers used, {k.n_spills} spills, {k.shared/1000} kB shared memory\n")
 
-    # with open('matmul_split_k.txt', 'w') as f:
+    with open("matmul_split_k.txt", "w") as f:
+        #     print(f"{k.n_regs} registers used, {k.n_spills} spills, {k.shared/1000} kB shared memory\n", file=f)
+        #     print("IR", k.asm['ttir'], file=f)
+        #     print("TTGIR", k.asm['ttgir'], file=f)
+        print("PTX", k.asm["ptx"], file=f)
+        # print(
+        #     f"{k.n_regs} registers used, {k.n_spills} spills, {k.shared/1000} kB shared memory\n",
+        #     file=f,
+        # )
 
-    #     print(f"{k.n_regs} registers used, {k.n_spills} spills, {k.shared/1000} kB shared memory\n", file=f)
-    #     print("IR", k.asm['ttir'], file=f)
-    #     print("TTGIR", k.asm['ttgir'], file=f)
-    #     print("PTX", k.asm['ptx'], file=f)
-    #     print(f"{k.n_regs} registers used, {k.n_spills} spills, {k.shared/1000} kB shared memory\n", file=f)
 
-    return c
+def bench(func, num_iterations):
+    # warm up
+    ret = func()
+    start = time.time()
+    for _ in range(num_iterations):
+        func()
+    stop = time.time()
+    return ret, start, stop
 
-    
-    
-    
 
+if __name__ == "__main__":
+    torch.cuda.manual_seed(0)
+    num_iterations = 1000
+    a_ = torch.zeros((16, 4096), device="cuda", dtype=torch.float8_e4m3fn)
+    b_ = torch.zeros((4096, 4096), device="cuda", dtype=torch.float8_e4m3fn).T
+    c_ = torch.zeros((16, 4096), device=a_.device, dtype=torch.float16)
+
+    # start = time.time()
+    # c = torch._scaled_mm(a_, b_, out_dtype=torch.float16, use_fast_accum=True)
+    # stop = time.time()
+    # print(f"cuBLAS FP8 {stop-start}\n")
+    ret, start, stop = bench(lambda: gemm_split_k(a_, b_, c_), num_iterations)
+    print(f"Triton FP8 {stop-start}\n")
+
+    # a = torch.zeros((16, 4096), device="cuda", dtype=torch.float16)
+    # b = torch.zeros((4096, 4096), device="cuda", dtype=torch.float16).T
+    # ret, start, stop = bench(lambda: torch.matmul(a, b), num_iterations)
+    # print(f"Triton FP16 {stop-start}\n")
