@@ -3,6 +3,7 @@ import triton
 import triton.language as tl
 import time
 import os
+from torch.testing import assert_close
 
 os.environ["ENABLE_TMA"] = "1"
 
@@ -78,10 +79,10 @@ def gemm_split_k_kernel(
         b = tl.load(b_ptrs, mask=offs_k[:, None] < k_remaining, other=0.0)
 
         acc = tl.dot(a, b, acc, out_dtype=tl.float32)
+        # acc += tl.dot(a, b)
 
         a_ptrs += block_k * split_k * stride_ak
         b_ptrs += block_k * split_k * stride_bk
-
     acc.to(tl.float16)
 
     offs_m = pid_m * block_m + tl.arange(0, block_m)
@@ -102,7 +103,7 @@ def gemm_split_k(a, b, c):
     block_k = 512
     num_stages = 3
     num_warps = 8
-    split_k = 2
+    split_k = 1
     group_m = 1
 
     total_blocks_m = triton.cdiv(m, block_m)
@@ -166,17 +167,22 @@ def bench(func, num_iterations):
 
 if __name__ == "__main__":
     torch.cuda.manual_seed(0)
-    num_iterations = 1000
-    a_ = torch.ones((16, 4096), device="cuda", dtype=torch.float8_e4m3fn)
-    b_ = torch.ones((4096, 4096), device="cuda", dtype=torch.float8_e4m3fn).T
-    c_ = torch.zeros((16, 4096), device=a_.device, dtype=torch.float16)
+    num_iterations = 0
+    # a_ = torch.ones((16, 4096), device="cuda", dtype=torch.float16)
+    # b_ = torch.ones((4096, 4096), device="cuda", dtype=torch.float16).T
+    a_ = torch.randn((16, 4096), device="cuda", dtype=torch.float16)
+    b_ = torch.randn((4096, 4096), device="cuda", dtype=torch.float16).T
+    a_ = a_.to(torch.float8_e4m3fn)
+    b_ = b_.to(torch.float8_e4m3fn)
 
-    # ret, start, stop = bench(
+    # ret1, start, stop = bench(
     #     lambda: torch._scaled_mm(a_, b_, out_dtype=torch.float16, use_fast_accum=True),
     #     num_iterations,
     # )
     # print(f"cuBLAS FP8 {stop-start}\n")
-    ret, start, stop = bench(lambda: gemm_split_k(a_, b_, c_), num_iterations)
+
+    c_ = torch.zeros((16, 4096), device=a_.device, dtype=torch.float16)
+    ret2, start, stop = bench(lambda: gemm_split_k(a_, b_, c_), num_iterations)
     print(f"Triton FP8 {stop-start}\n")
 
     # a = torch.zeros((16, 4096), device="cuda", dtype=torch.float16)
@@ -187,5 +193,7 @@ if __name__ == "__main__":
     a_f32 = a_.to(torch.float32)
     b_f32 = b_.to(torch.float32)
     golden = torch.matmul(a_f32, b_f32)
-    print("C:\n", c_)
+    print("C1:\n", c_)
+    # print("C2:\n", ret1)
     print("Ref:\n", golden)
+    assert_close(c_, golden, rtol=2, atol=1e-3, check_dtype=False)
