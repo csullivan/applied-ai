@@ -25,8 +25,8 @@ def grouped_launch(
     return pid_m, pid_n
 
 
-@triton.jit()
-def col_major(pid, m, n, block_m: tl.constexpr, block_n: tl.constexpr):
+@triton.jit
+def col_major(pid, m, n, block_m: tl.constexpr):
     grid_m = tl.cdiv(m, block_m)
 
     pid_m = pid % grid_m
@@ -59,22 +59,35 @@ def gemm_split_k_kernel(
     pid_k = tl.program_id(1)
     grid_k = tl.cdiv(k, block_k * split_k)
 
-    pid_m, pid_n = grouped_launch(pid, m, n, block_m, block_n, group_m)
+    pid_m, pid_n = col_major(pid, m, n, block_m)
+    # pid_m, pid_n = grouped_launch(pid, m, n, block_m, block_n, group_m)
 
     offs_m = pid_m * block_m + tl.arange(0, block_m)
     offs_n = pid_n * block_n + tl.arange(0, block_n)
     offs_k = pid_k * block_k + tl.arange(0, block_k)
+    # tl.device_print("pid_n", pid_n)
 
     offs_am = tl.max_contiguous(tl.multiple_of(offs_m, block_m), block_m)
     offs_bn = tl.max_contiguous(tl.multiple_of(offs_n, block_n), block_n)
 
+    # tl.device_print("offs_bn", offs_bn)
+
+    # tl.device_print("stride_am", stride_am)
+    # tl.device_print("stride_ak", stride_ak)
+    # tl.device_print("stride_bk", stride_bk)
+    # tl.device_print("stride_bn", stride_bn)
+
     a_ptrs = a_ptr + (offs_am[:, None] * stride_am + offs_k[None, :] * stride_ak)
     b_ptrs = b_ptr + (offs_k[:, None] * stride_bk + offs_bn[None, :] * stride_bn)
+    # tl.device_print("offs_bn * stride_bn", offs_bn * stride_bn)
+    # tl.device_print("n", n)
+    # tl.device_print("k", k)
+    # tl.device_assert(offs_bn * stride_bn < n * k, "access b_ptr out of bounds along n")
 
     acc = tl.zeros((block_m, block_n), dtype=tl.float32)
     for k_ in range(0, grid_k):
         k_remaining = k - k_ * (block_k * split_k)
-
+        # tl.device_print("k_remaining", k_remaining)
         a = tl.load(a_ptrs, mask=offs_k[None, :] < k_remaining, other=0.0)
         b = tl.load(b_ptrs, mask=offs_k[:, None] < k_remaining, other=0.0)
 
@@ -96,15 +109,38 @@ def gemm_split_k_kernel(
 
 def gemm_split_k(a, b, c):
     m, k = a.shape
-    _, n = b.shape
+    n, _ = b.shape
+    b_strides = (1, k)
+    # b_strides = (b.stride(1), b.stride(0))
+    # b_strides = (1, 4096)
+    # b_strides = (4096, 1)
+    # b_strides = (8100, 1)
 
-    block_m = 16
-    block_n = 32
+    # TODO(csullivan): good config for M, N, K = 16, 28672, 4096
+    # block_m = 64
+    # block_n = 64
+    # block_k = 128
+    # num_stages = 3
+    # num_warps = 8
+    # split_k = 2
+    # group_m = 8
+
+    # TODO(csullivan): good config for M, N, K = 16, 4096, 4096
+    # block_m = 64
+    # block_n = 64
+    # block_k = 512
+    # num_stages = 3
+    # num_warps = 8
+    # split_k = 2
+    # group_m = 8
+
+    block_m = 64
+    block_n = 64
     block_k = 512
     num_stages = 3
     num_warps = 8
-    split_k = 1
-    group_m = 1
+    split_k = 2
+    group_m = 8
 
     total_blocks_m = triton.cdiv(m, block_m)
     total_blocks_n = triton.cdiv(n, block_n)
@@ -126,8 +162,8 @@ def gemm_split_k(a, b, c):
         c,
         a.stride(0),
         a.stride(1),
-        b.stride(0),
-        b.stride(1),
+        b_strides[0],
+        b_strides[1],
         c.stride(0),
         c.stride(1),
         m,
@@ -155,9 +191,11 @@ def gemm_split_k(a, b, c):
         # )
 
 
-def bench(func, num_iterations):
+def bench(func, num_iterations, output=None):
     # warm up
     ret = func()
+    if output != None:
+        ret = output.cpu().numpy()
     start = time.time()
     for _ in range(num_iterations):
         func()
@@ -166,34 +204,56 @@ def bench(func, num_iterations):
 
 
 if __name__ == "__main__":
+    print("start")
     torch.cuda.manual_seed(0)
-    num_iterations = 0
-    # a_ = torch.ones((16, 4096), device="cuda", dtype=torch.float16)
-    # b_ = torch.ones((4096, 4096), device="cuda", dtype=torch.float16).T
-    a_ = torch.randn((16, 4096), device="cuda", dtype=torch.float16)
-    b_ = torch.randn((4096, 4096), device="cuda", dtype=torch.float16).T
+    num_iterations = 1000
+
+    M, N, K = 16, 4096, 4096
+    M, N, K = 16, 28672, 4096
+    M, N, K = 16, 4096, 14336
+    M, N, K = 16, 6144, 4096
+
+    a_ = torch.ones((M, K), device="cuda", dtype=torch.float16)
+    # actual data layout is KN
+    b_ = torch.ones((N, K), device="cuda", dtype=torch.float16)
+
+    b_[0, 1] = 10
+    # a_ = torch.randn((M, K), device="cuda", dtype=torch.float16)
+    # b_ = torch.randn((K, N), device="cuda", dtype=torch.float16).T
     a_ = a_.to(torch.float8_e4m3fn)
     b_ = b_.to(torch.float8_e4m3fn)
 
-    # ret1, start, stop = bench(
-    #     lambda: torch._scaled_mm(a_, b_, out_dtype=torch.float16, use_fast_accum=True),
-    #     num_iterations,
-    # )
-    # print(f"cuBLAS FP8 {stop-start}\n")
+    ####
+    ## After lunch, bring in TVM cublas and compare, possibly use ptx to make kernel and compare e2e thereafter
+    ####
 
-    c_ = torch.zeros((16, 4096), device=a_.device, dtype=torch.float16)
-    ret2, start, stop = bench(lambda: gemm_split_k(a_, b_, c_), num_iterations)
+    c_ = torch.zeros((M, N), device=a_.device, dtype=torch.float16)
+
+    result, start, stop = bench(
+        lambda: gemm_split_k(a_, b_, c_), num_iterations, output=c_
+    )
     print(f"Triton FP8 {stop-start}\n")
 
-    # a = torch.zeros((16, 4096), device="cuda", dtype=torch.float16)
-    # b = torch.zeros((4096, 4096), device="cuda", dtype=torch.float16).T
+    ret1, start, stop = bench(
+        lambda: torch._scaled_mm(
+            a_, b_.T, out_dtype=torch.float16, use_fast_accum=True
+        ),
+        num_iterations,
+    )
+    print(f"cuBLAS FP8 {stop-start}\n")
+
+    # a = torch.zeros((M, K), device="cuda", dtype=torch.float16)
+    # b = torch.zeros((K, N), device="cuda", dtype=torch.float16).T
     # ret, start, stop = bench(lambda: torch.matmul(a, b), num_iterations)
     # print(f"Triton FP16 {stop-start}\n")
 
-    a_f32 = a_.to(torch.float32)
-    b_f32 = b_.to(torch.float32)
-    golden = torch.matmul(a_f32, b_f32)
-    print("C1:\n", c_)
+    a_f16 = torch.ones((M, K), device="cuda", dtype=torch.float16)
+    b_f16 = torch.ones((K, N), device="cuda", dtype=torch.float16)
+    b_f16[1, 0] = 10
+    ret, start, stop = bench(lambda: torch.matmul(a_f16, b_f16), num_iterations)
+
+    golden = torch.matmul(a_f16, b_f16)
+    print("C1:\n", result)
     # print("C2:\n", ret1)
     print("Ref:\n", golden)
-    assert_close(c_, golden, rtol=2, atol=1e-3, check_dtype=False)
+    assert_close(result, golden.cpu().numpy(), rtol=0.1, atol=1e-3, check_dtype=False)
