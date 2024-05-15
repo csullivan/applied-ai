@@ -125,12 +125,12 @@ def gemm_split_k(a, b, c):
     # split_k = 2
 
     # TODO(csullivan): good config for M, N, K = 16, 4096, 4096
-    # block_m = 64
-    # block_n = 64
-    # block_k = 512
-    # num_stages = 3
-    # num_warps = 4
-    # split_k = 2
+    block_m = 64
+    block_n = 64
+    block_k = 256
+    num_stages = 3
+    num_warps = 4
+    split_k = 2
 
     # TODO(csullivan): good config for M, N, K = 16, 4096, 14336
     # block_m = 64
@@ -141,12 +141,12 @@ def gemm_split_k(a, b, c):
     # split_k = 2
 
     # TODO(csullivan): good config for M, N, K = 16, 6144, 4096
-    block_m = 64
-    block_n = 64
-    block_k = 128
-    num_stages = 4
-    num_warps = 4
-    split_k = 2
+    # block_m = 64
+    # block_n = 64
+    # block_k = 128
+    # num_stages = 4
+    # num_warps = 4
+    # split_k = 2
 
     total_blocks_m = triton.cdiv(m, block_m)
     total_blocks_n = triton.cdiv(n, block_n)
