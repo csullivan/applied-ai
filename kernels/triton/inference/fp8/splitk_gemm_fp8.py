@@ -121,26 +121,32 @@ def gemm_split_k(a, b, c):
     # block_n = 64
     # block_k = 128
     # num_stages = 3
-    # num_warps = 8
+    # num_warps = 4
     # split_k = 2
-    # group_m = 8
 
     # TODO(csullivan): good config for M, N, K = 16, 4096, 4096
     # block_m = 64
     # block_n = 64
     # block_k = 512
     # num_stages = 3
-    # num_warps = 8
+    # num_warps = 4
     # split_k = 2
-    # group_m = 8
 
+    # TODO(csullivan): good config for M, N, K = 16, 4096, 14336
+    # block_m = 64
+    # block_n = 64
+    # block_k = 256
+    # num_stages = 4
+    # num_warps = 4
+    # split_k = 2
+
+    # TODO(csullivan): good config for M, N, K = 16, 6144, 4096
     block_m = 64
     block_n = 64
-    block_k = 512
-    num_stages = 3
-    num_warps = 8
+    block_k = 128
+    num_stages = 4
+    num_warps = 4
     split_k = 2
-    group_m = 8
 
     total_blocks_m = triton.cdiv(m, block_m)
     total_blocks_n = triton.cdiv(n, block_n)
@@ -173,7 +179,7 @@ def gemm_split_k(a, b, c):
         block_n,
         block_k,
         split_k,
-        group_m,
+        group_m=8,
         num_stages=num_stages,
         num_warps=num_warps,
     )
@@ -209,15 +215,18 @@ if __name__ == "__main__":
     num_iterations = 1000
 
     M, N, K = 16, 4096, 4096
-    M, N, K = 16, 28672, 4096
-    M, N, K = 16, 4096, 14336
-    M, N, K = 16, 6144, 4096
+    # M, N, K = 16, 28672, 4096
+    # M, N, K = 16, 4096, 14336
+    # M, N, K = 16, 6144, 4096
 
-    a_ = torch.ones((M, K), device="cuda", dtype=torch.float16)
+    # a_ = torch.ones((M, K), device="cuda", dtype=torch.float16)
+    # # actual data layout is KN
+    # b_ = torch.ones((N, K), device="cuda", dtype=torch.float16)
+    # b_[0, 1] = 10
+    a_ = torch.randn((M, K), device="cuda", dtype=torch.float16)
     # actual data layout is KN
-    b_ = torch.ones((N, K), device="cuda", dtype=torch.float16)
+    b_ = torch.randn((N, K), device="cuda", dtype=torch.float16)
 
-    b_[0, 1] = 10
     # a_ = torch.randn((M, K), device="cuda", dtype=torch.float16)
     # b_ = torch.randn((K, N), device="cuda", dtype=torch.float16).T
     a_ = a_.to(torch.float8_e4m3fn)
@@ -247,9 +256,11 @@ if __name__ == "__main__":
     # ret, start, stop = bench(lambda: torch.matmul(a, b), num_iterations)
     # print(f"Triton FP16 {stop-start}\n")
 
-    a_f16 = torch.ones((M, K), device="cuda", dtype=torch.float16)
-    b_f16 = torch.ones((K, N), device="cuda", dtype=torch.float16)
-    b_f16[1, 0] = 10
+    # a_f16 = torch.ones((M, K), device="cuda", dtype=torch.float16)
+    # b_f16 = torch.ones((K, N), device="cuda", dtype=torch.float16)
+    # b_f16[1, 0] = 10
+    a_f16 = a_.to(torch.float16)
+    b_f16 = b_.to(torch.float16).T
     ret, start, stop = bench(lambda: torch.matmul(a_f16, b_f16), num_iterations)
 
     golden = torch.matmul(a_f16, b_f16)
