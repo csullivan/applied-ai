@@ -83,12 +83,15 @@ def gemm_split_k_kernel(
     # tl.device_print("stride_ak", stride_ak)
     # tl.device_print("stride_bk", stride_bk)
     # tl.device_print("stride_bn", stride_bn)
+    # tl.device_print("stride_cm", stride_cm)
+    # tl.device_print("stride_cn", stride_cn)
 
     a_ptrs = a_ptr + (offs_am[:, None] * stride_am + offs_k[None, :] * stride_ak)
     b_ptrs = b_ptr + (offs_k[:, None] * stride_bk + offs_bn[None, :] * stride_bn)
     # tl.device_print("offs_bn * stride_bn", offs_bn * stride_bn)
     # tl.device_print("n", n)
     # tl.device_print("k", k)
+    # tl.device_print("m", m)
     # tl.device_assert(offs_bn * stride_bn < n * k, "access b_ptr out of bounds along n")
 
     acc = tl.zeros((block_m, block_n), dtype=tl.float32)
@@ -124,10 +127,6 @@ def gemm_split_k(a, b, c, scale_a, scale_b):
     m, k = a.shape
     n, _ = b.shape
     b_strides = (1, k)
-    # b_strides = (b.stride(1), b.stride(0))
-    # b_strides = (1, 4096)
-    # b_strides = (4096, 1)
-    # b_strides = (8100, 1)
 
     # TODO(csullivan): good config for M, N, K = 16, 28672, 4096
     block_m = 64
@@ -147,6 +146,14 @@ def gemm_split_k(a, b, c, scale_a, scale_b):
 
     # TODO(csullivan): good config for M, N, K = 17, 4096, 4096
     # block_m = 64
+    # block_n = 64
+    # block_k = 512
+    # num_stages = 3
+    # num_warps = 8
+    # split_k = 2
+
+    # ! works with ada instructions on hopper for (17, 28672, 4096)
+    # block_m = 16
     # block_n = 64
     # block_k = 512
     # num_stages = 3
