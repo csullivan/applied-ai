@@ -94,9 +94,14 @@ def gemm_split_k_kernel(
     acc = tl.zeros((block_m, block_n), dtype=tl.float32)
     for k_ in range(0, grid_k):
         k_remaining = k - k_ * (block_k * split_k)
-        # tl.device_print("k_remaining", k_remaining)
-        a = tl.load(a_ptrs, mask=offs_k[None, :] < k_remaining, other=0.0)
-        b = tl.load(b_ptrs, mask=offs_k[:, None] < k_remaining, other=0.0)
+        m_remaining = m - pid_m * block_m
+        n_remaining = n - pid_n * block_n
+
+        valid_m = offs_m < m_remaining
+        valid_k = offs_k < k_remaining
+
+        a = tl.load(a_ptrs, mask=valid_k[None, :] & valid_m[:, None], other=0.0)
+        b = tl.load(b_ptrs, mask=valid_k[:, None], other=0.0)
 
         acc = tl.dot(a, b, acc, out_dtype=tl.float32)
         # acc += tl.dot(a, b)
