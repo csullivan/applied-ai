@@ -4,6 +4,7 @@ import triton.language as tl
 import time
 import os
 from torch.testing import assert_close
+import numpy as np
 
 os.environ["ENABLE_TMA"] = "1"
 
@@ -40,6 +41,8 @@ def gemm_split_k_kernel(
     a_ptr,
     b_ptr,
     c_ptr,
+    scale_a_ptr,
+    scale_b_ptr,
     stride_am,
     stride_ak,
     stride_bk,
@@ -55,6 +58,10 @@ def gemm_split_k_kernel(
     split_k: tl.constexpr,
     group_m: tl.constexpr,
 ):
+    # Get the device scales
+    scale_a = tl.load(scale_a_ptr, mask=True, other=0.0)
+    scale_b = tl.load(scale_b_ptr, mask=True, other=0.0)
+
     pid = tl.program_id(0)
     pid_k = tl.program_id(1)
     grid_k = tl.cdiv(k, block_k * split_k)
@@ -96,6 +103,7 @@ def gemm_split_k_kernel(
 
         a_ptrs += block_k * split_k * stride_ak
         b_ptrs += block_k * split_k * stride_bk
+    acc = scale_a * scale_b * acc
     acc.to(tl.float16)
 
     offs_m = pid_m * block_m + tl.arange(0, block_m)
@@ -107,7 +115,7 @@ def gemm_split_k_kernel(
     tl.atomic_add(c_ptrs, acc, mask=mask)
 
 
-def gemm_split_k(a, b, c):
+def gemm_split_k(a, b, c, scale_a, scale_b):
     m, k = a.shape
     n, _ = b.shape
     b_strides = (1, k)
@@ -170,19 +178,22 @@ def gemm_split_k(a, b, c):
     # print(f"total thread blocks k: {k}, total thread blocks m and total thread blocks n = {total_blocks_m=} x {total_blocks_n} = {total_programs_mn}")
     # print(f"{total_programs_mn=}, {total_programs_k=}")
 
+    print(grid)
     k = gemm_split_k_kernel[grid](
-        a,
-        b,
-        c,
-        a.stride(0),
-        a.stride(1),
-        b_strides[0],
-        b_strides[1],
-        c.stride(0),
-        c.stride(1),
-        m,
-        n,
-        k,
+        a,  # 0*
+        b,  # 1*
+        c,  # 2*
+        scale_a,  # 3*
+        scale_b,  # 4*
+        a.stride(0),  # 5*
+        a.stride(1),  # 6
+        b_strides[0],  # 7
+        b_strides[1],  # 8*
+        c.stride(0),  # 9*
+        c.stride(1),  # 10
+        m,  # 11*
+        n,  # 12*
+        k,  # 13*
         block_m,
         block_n,
         block_k,
@@ -194,11 +205,11 @@ def gemm_split_k(a, b, c):
 
     # print(f"{k.n_regs} registers used, {k.n_spills} spills, {k.shared/1000} kB shared memory\n")
 
-    with open("matmul_split_k.ptx", "w") as f:
+    with open("matmul_split_k2.ptx", "w") as f:
         #     print(f"{k.n_regs} registers used, {k.n_spills} spills, {k.shared/1000} kB shared memory\n", file=f)
         #     print("IR", k.asm['ttir'], file=f)
         #     print("TTGIR", k.asm['ttgir'], file=f)
-        print("PTX", k.asm["ptx"], file=f)
+        print(k.asm["ptx"], file=f)
         # print(
         #     f"{k.n_regs} registers used, {k.n_spills} spills, {k.shared/1000} kB shared memory\n",
         #     file=f,
@@ -243,6 +254,10 @@ if __name__ == "__main__":
         a_ = torch.randn((M, K), device="cuda", dtype=torch.float16)
         # actual data layout is KN
         b_ = torch.randn((N, K), device="cuda", dtype=torch.float16)
+        # scale_a = torch.randn((1,), device="cuda", dtype=torch.float32)
+        # scale_b = torch.randn((1,), device="cuda", dtype=torch.float32)
+        scale_a = torch.from_numpy(np.array([1])).to(device="cuda", dtype=torch.float32)
+        scale_b = torch.from_numpy(np.array([1])).to(device="cuda", dtype=torch.float32)
 
         # a_ = torch.randn((M, K), device="cuda", dtype=torch.float16)
         # b_ = torch.randn((K, N), device="cuda", dtype=torch.float16).T
@@ -256,17 +271,19 @@ if __name__ == "__main__":
         c_ = torch.zeros((M, N), device=a_.device, dtype=torch.float16)
 
         result, start, stop = bench(
-            lambda: gemm_split_k(a_, b_, c_), num_iterations, output=c_
+            lambda: gemm_split_k(a_, b_, c_, scale_a, scale_b),
+            num_iterations,
+            output=c_,
         )
         print(f"Triton FP8 {stop-start}\n")
 
-        ret1, start, stop = bench(
-            lambda: torch._scaled_mm(
-                a_, b_.T, out_dtype=torch.float16, use_fast_accum=True
-            ),
-            num_iterations,
-        )
-        print(f"cuBLAS FP8 {stop-start}\n")
+        # ret1, start, stop = bench(
+        #     lambda: torch._scaled_mm(
+        #         a_, b_.T, out_dtype=torch.float16, use_fast_accum=True
+        #     ),
+        #     num_iterations,
+        # )
+        # print(f"cuBLAS FP8 {stop-start}\n")
 
         # a = torch.zeros((M, K), device="cuda", dtype=torch.float16)
         # b = torch.zeros((K, N), device="cuda", dtype=torch.float16).T
@@ -284,6 +301,7 @@ if __name__ == "__main__":
         print("C1:\n", result)
         # print("C2:\n", ret1)
         print("Ref:\n", golden)
+        print("Ratio:\n", golden.cpu().numpy() / result)
         # assert_close(
         #     result, golden.cpu().numpy(), rtol=0.1, atol=1e-3, check_dtype=False
         # )
