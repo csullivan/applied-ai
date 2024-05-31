@@ -3,6 +3,7 @@ from torch.testing import assert_close
 import cupy as cp
 import ml_dtypes
 import time
+import numpy as np
 
 
 def bench(func, num_iterations, output=None):
@@ -43,19 +44,19 @@ def ceildiv(a, b):
 
 
 # Define the path to the PTX file containing the matmul_kernel
-ptx_code_path = "./matmul_split_k2.ptx"
+ptx_code_path = "./matmul_split_k2_f16.ptx.save"
 
 # Create a RawModule object to load the PTX code
 raw_module = cp.RawModule(path=ptx_code_path)
 
 # Retrieve the matmul kernel function from the PTX code
-matmul_kernel = raw_module.get_function("gemm_split_k_kernel")
+matmul_kernel = raw_module.get_function("scaled_gemm_split_k_kernel")
 
 # Define the dimensions of the matrices
 m_n_k_tuple = (
-    (5, 4096, 4096),
-    (5, 28672, 4096),
-    (5, 4096, 14336),
+    # (5, 4096, 4096),
+    # (5, 28672, 4096),
+    # (5, 4096, 14336),
     (5, 6144, 4096),
 )
 for M, N, K in m_n_k_tuple:
@@ -68,8 +69,10 @@ for M, N, K in m_n_k_tuple:
     # Create random matrices A and B and an output matrix C
     A = torch.randn((M, K), device="cuda", dtype=torch.float16)
     B = torch.randn((N, K), device="cuda", dtype=torch.float16)
-    A = A.to(torch.float8_e4m3fn)
-    B = B.to(torch.float8_e4m3fn)
+    scale_a = torch.from_numpy(np.array([1])).to(device="cuda", dtype=torch.float32)
+    scale_b = torch.from_numpy(np.array([1])).to(device="cuda", dtype=torch.float32)
+    # A = A.to(torch.float8_e4m3fn)
+    # B = B.to(torch.float8_e4m3fn)
 
     # A = torch.full((M, K), 1.0, dtype=torch.float8_e4m3fn, device="cuda")
     # B = torch.full((K, N), 1.0, dtype=torch.float8_e4m3fn, device="cuda")
@@ -95,7 +98,7 @@ for M, N, K in m_n_k_tuple:
 
     block = (num_warps * 32, 1, 1)
     print(grid, block)
-    shared_memory_size = 49152
+    shared_memory_size = 98304
 
     # Launch the kernel
     num_iterations = 1000
@@ -107,6 +110,8 @@ for M, N, K in m_n_k_tuple:
                 A.data_ptr(),
                 B.data_ptr(),
                 C.data_ptr(),
+                scale_a.data_ptr(),
+                scale_b.data_ptr(),
                 stride_am,
                 stride_bk,
                 stride_zm,

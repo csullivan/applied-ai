@@ -37,7 +37,7 @@ def col_major(pid, m, n, block_m: tl.constexpr):
 
 
 @triton.jit
-def gemm_split_k_kernel(
+def scaled_gemm_split_k_kernel(
     a_ptr,
     b_ptr,
     c_ptr,
@@ -58,7 +58,6 @@ def gemm_split_k_kernel(
     split_k: tl.constexpr,
     group_m: tl.constexpr,
 ):
-    # Get the device scales
     scale_a = tl.load(scale_a_ptr, mask=True, other=0.0)
     scale_b = tl.load(scale_b_ptr, mask=True, other=0.0)
 
@@ -67,32 +66,15 @@ def gemm_split_k_kernel(
     grid_k = tl.cdiv(k, block_k * split_k)
 
     pid_m, pid_n = col_major(pid, m, n, block_m)
-    # pid_m, pid_n = grouped_launch(pid, m, n, block_m, block_n, group_m)
-
     offs_m = pid_m * block_m + tl.arange(0, block_m)
     offs_n = pid_n * block_n + tl.arange(0, block_n)
     offs_k = pid_k * block_k + tl.arange(0, block_k)
-    # tl.device_print("pid_n", pid_n)
 
     offs_am = tl.max_contiguous(tl.multiple_of(offs_m, block_m), block_m)
     offs_bn = tl.max_contiguous(tl.multiple_of(offs_n, block_n), block_n)
 
-    # tl.device_print("offs_bn", offs_bn)
-
-    # tl.device_print("stride_am", stride_am)
-    # tl.device_print("stride_ak", stride_ak)
-    # tl.device_print("stride_bk", stride_bk)
-    # tl.device_print("stride_bn", stride_bn)
-    # tl.device_print("stride_cm", stride_cm)
-    # tl.device_print("stride_cn", stride_cn)
-
     a_ptrs = a_ptr + (offs_am[:, None] * stride_am + offs_k[None, :] * stride_ak)
     b_ptrs = b_ptr + (offs_k[:, None] * stride_bk + offs_bn[None, :] * stride_bn)
-    # tl.device_print("offs_bn * stride_bn", offs_bn * stride_bn)
-    # tl.device_print("n", n)
-    # tl.device_print("k", k)
-    # tl.device_print("m", m)
-    # tl.device_assert(offs_bn * stride_bn < n * k, "access b_ptr out of bounds along n")
 
     acc = tl.zeros((block_m, block_n), dtype=tl.float32)
     for k_ in range(0, grid_k):
@@ -107,7 +89,6 @@ def gemm_split_k_kernel(
         b = tl.load(b_ptrs, mask=valid_k[:, None], other=0.0)
 
         acc = tl.dot(a, b, acc, out_dtype=tl.float32)
-        # acc += tl.dot(a, b)
 
         a_ptrs += block_k * split_k * stride_ak
         b_ptrs += block_k * split_k * stride_bk
@@ -118,9 +99,12 @@ def gemm_split_k_kernel(
     offs_n = pid_n * block_n + tl.arange(0, block_n)
 
     c_ptrs = c_ptr + (offs_m[:, None] * stride_cm + offs_n[None, :] * stride_cn)
-    mask = (offs_m < m)[:, None] & (offs_n < n)[None, :]
+    mask_init = (offs_m < m)[:, None] & (offs_n < n)[None, :]
 
-    tl.atomic_add(c_ptrs, acc, mask=mask)
+    if split_k > 1:
+        tl.atomic_add(c_ptrs, acc, mask=mask_init)
+    else:
+        tl.store(c_ptrs, acc, mask=mask_init)
 
 
 def gemm_split_k(a, b, c, scale_a, scale_b):
@@ -131,10 +115,10 @@ def gemm_split_k(a, b, c, scale_a, scale_b):
     # TODO(csullivan): good config for M, N, K = 16, 28672, 4096
     block_m = 64
     block_n = 64
-    block_k = 128
+    block_k = 512
     num_stages = 3
     num_warps = 4
-    split_k = 2
+    split_k = 1
 
     # TODO(csullivan): good config for M, N, K = 16, 4096, 4096
     # block_m = 64
@@ -191,7 +175,7 @@ def gemm_split_k(a, b, c, scale_a, scale_b):
     # print(f"{total_programs_mn=}, {total_programs_k=}")
 
     print(grid)
-    k = gemm_split_k_kernel[grid](
+    k = scaled_gemm_split_k_kernel[grid](
         a,  # 0*
         b,  # 1*
         c,  # 2*
