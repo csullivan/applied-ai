@@ -125,10 +125,10 @@ def moe_via_ggemm(A, B, C, topk_ids):
 
     # Calculate the bincount and indptr
     bincounts = torch.bincount(sorted_expert_ids, minlength=E)
-    indptr = torch.zeros(E + 1, dtype=torch.int64, device=A.device)
-    indptr[1:] = torch.cumsum(bincounts, dim=0)
+    indptr = torch.cumsum(bincounts, dim=0)
 
     # Perform group gemm
+    print(f"indptr = {indptr}")
     result = group_gemm(A_sorted, B, indptr)
 
     # Reshape and reorder the result
@@ -145,9 +145,19 @@ def group_gemm(A, B, indptr):
     result = torch.zeros((M, N), device=A.device, dtype=A.dtype)
 
     for e in range(E):
-        start, end = indptr[e], indptr[e + 1]
-        if start < end:
-            result[start:end] = torch.mm(A[start:end], B[e].T)
+        if e == 0:
+            start = 0
+        else:
+            start = indptr[e - 1]
+        end = indptr[e]
+
+        if start == end:
+            # No tokens for this expert
+            continue
+        elif start > end:
+            raise ValueError("indptr must be monotonically increasing")
+
+        result[start:end] = torch.mm(A[start:end], B[e].T)
 
     return result
 
