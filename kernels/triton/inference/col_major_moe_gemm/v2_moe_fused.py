@@ -11,7 +11,7 @@
 import torch
 import triton
 import triton.language as tl
-from vllm._C import ops
+from vllm import _custom_ops as ops
 
 
 @triton.jit()
@@ -189,19 +189,21 @@ def invoke_fused_moe_kernel(A: torch.Tensor, B: torch.Tensor, C: torch.Tensor,
     EM = sorted_token_ids.shape[0]
     N = B.shape[1]
 
-    grid = lambda META: (triton.cdiv(EM, META['block_m']) * triton.cdiv(N, META['block_n']), )
-    A = A.to(torch.float8_e4m3fn)
+    grid = lambda META: (
+        triton.cdiv(EM, META["block_m"]) * triton.cdiv(N, META["block_n"]),
+    )
+    # A = A.to(torch.float8_e4m3fn)
 
     compute_type = tl.float16
-    if A.dtype == torch.bfloat16:
-        compute_type = tl.bfloat16
-    elif A.dtype == torch.float8_e4m3fn:
-        compute_type = tl.float8e4nv
-        assert B.dtype == torch.float8_e4m3fn
-    else:
-        raise NotImplementedError(
-            f"TODO(csullivan): Compute type needs to be added: {str(A.dtype)}"
-        )
+    # if A.dtype == torch.bfloat16:
+    #     compute_type = tl.bfloat16
+    # elif A.dtype == torch.float8_e4m3fn:
+    #     compute_type = tl.float8e4nv
+    #     assert B.dtype == torch.float8_e4m3fn
+    # else:
+    #     raise NotImplementedError(
+    #         f"TODO(csullivan): Compute type needs to be added: {str(A.dtype)}"
+    # )
 
     fused_moe_kernel[grid](
         A,
@@ -291,7 +293,7 @@ def fused_moe(hidden_states: torch.Tensor,
     config = {
         "block_m": 16,
         "block_n": 16,
-        "block_k": 128,
+        "block_k": 256,
     }
     print(2112, config)
 
@@ -306,23 +308,47 @@ def fused_moe(hidden_states: torch.Tensor,
                                       dtype=hidden_states.dtype)
 
     sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
-        topk_ids, config['block_m'], E)
+        topk_ids, config["block_m"], E
+    )
 
-    invoke_fused_moe_kernel(hidden_states, w1, intermediate_cache1,
-                            topk_weights, topk_ids, sorted_token_ids,
-                            expert_ids, num_tokens_post_padded, False,
-                            topk_ids.shape[1], config)
+    # import ipdb
 
-    ops.silu_and_mul(intermediate_cache2, intermediate_cache1.view(-1, N))
+    # ipdb.set_trace()
+    invoke_fused_moe_kernel(
+        hidden_states,
+        w1,
+        intermediate_cache1,
+        topk_weights,
+        topk_ids,
+        sorted_token_ids,
+        expert_ids,
+        num_tokens_post_padded,
+        False,
+        topk_ids.shape[1],
+        config,
+    )
+    return intermediate_cache1
 
-    invoke_fused_moe_kernel(intermediate_cache2, w2, intermediate_cache3,
-                            topk_weights, topk_ids, sorted_token_ids,
-                            expert_ids, num_tokens_post_padded, True, 1,
-                            config)
+    # ops.silu_and_mul(intermediate_cache2, intermediate_cache1.view(-1, N))
 
-    if inplace:
-        return torch.sum(intermediate_cache3.view(*intermediate_cache3.shape),
-                         dim=1,
-                         out=hidden_states)
-    return torch.sum(intermediate_cache3.view(*intermediate_cache3.shape),
-                     dim=1)
+    # invoke_fused_moe_kernel(
+    #     intermediate_cache2,
+    #     w2,
+    #     intermediate_cache3,
+    #     topk_weights,
+    #     topk_ids,
+    #     sorted_token_ids,
+    #     expert_ids,
+    #     num_tokens_post_padded,
+    #     True,
+    #     1,
+    #     config,
+    # )
+
+    # if inplace:
+    #     return torch.sum(
+    #         intermediate_cache3.view(*intermediate_cache3.shape),
+    #         dim=1,
+    #         out=hidden_states,
+    #     )
+    # return torch.sum(intermediate_cache3.view(*intermediate_cache3.shape), dim=1)
