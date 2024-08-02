@@ -15,17 +15,16 @@ from vllm import _custom_ops as ops
 
 
 @triton.jit()
-def col_major(pid,
-              m, n,
-              block_m: tl.constexpr, block_n: tl.constexpr):
+def col_major(pid, m, n, block_m: tl.constexpr, block_n: tl.constexpr):
 
     grid_m = tl.cdiv(m, block_m)
     grid_n = tl.cdiv(n, block_n)
 
-    pid_m = (pid % grid_n)
+    pid_m = pid % grid_m
     pid_n = pid // grid_m
 
     return pid_m, pid_n
+
 
 @triton.jit
 def fused_moe_kernel(
