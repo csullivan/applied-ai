@@ -77,9 +77,13 @@ def fused_moe_kernel(
     """
 
     pid = tl.program_id(axis=0)
-    pid_m, pid_n = col_major(pid,
-                             EM, N,
-                             block_m, block_n,)
+    pid_m, pid_n = col_major(
+        pid,
+        EM,
+        N,
+        block_m,
+        block_n,
+    )
 
     num_tokens_post_padded = tl.load(num_tokens_post_padded_ptr)
     if pid_m * block_m >= num_tokens_post_padded:
@@ -91,10 +95,16 @@ def fused_moe_kernel(
 
     offs_bn = (pid_n * block_n + tl.arange(0, block_n)) % N
     offs_k = tl.arange(0, block_k)
-    a_ptrs = a_ptr + (offs_token[:, None] // top_k * stride_am + offs_k[None, :] * stride_ak)
+    a_ptrs = a_ptr + (
+        offs_token[:, None] // top_k * stride_am + offs_k[None, :] * stride_ak
+    )
 
     off_experts = tl.load(expert_ids_ptr + pid_m)
-    b_ptrs = b_ptr + off_experts * stride_be + (offs_k[:, None] * stride_bk + offs_bn[None, :] * stride_bn)
+    b_ptrs = (
+        b_ptr
+        + off_experts * stride_be
+        + (offs_k[:, None] * stride_bk + offs_bn[None, :] * stride_bn)
+    )
     # -----------------------------------------------------------
     # Iterate to compute a block of the C matrix.
     # We accumulate into a `[block_m, block_n]` block
@@ -104,13 +114,12 @@ def fused_moe_kernel(
 
     for k in range(0, tl.cdiv(K, block_k)):
         # Load the next block of A and B, generate a mask by checking the K dimension.
-        a = tl.load(a_ptrs,
-                    mask=token_mask[:, None] &
-                    (offs_k[None, :] < K - k * block_k),
-                    other=0.0)
-        b = tl.load(b_ptrs,
-                    mask=offs_k[:, None] < K - k * block_k,
-                    other=0.0)
+        a = tl.load(
+            a_ptrs,
+            mask=token_mask[:, None] & (offs_k[None, :] < K - k * block_k),
+            other=0.0,
+        )
+        b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * block_k, other=0.0)
         # We accumulate along the K dimension.
         accumulator = tl.dot(a, b, accumulator, out_dtype=tl.float32)
         # Advance the ptrs to the next K block.
@@ -118,24 +127,23 @@ def fused_moe_kernel(
         b_ptrs += block_k * stride_bk
 
     if MUL_ROUTED_WEIGHT:
-        moe_weight = tl.load(topk_weights_ptr + offs_token * stride_weight,
-                             mask=token_mask,
-                             other=0)
+        moe_weight = tl.load(
+            topk_weights_ptr + offs_token * stride_weight, mask=token_mask, other=0
+        )
         accumulator = accumulator * moe_weight[:, None]
 
     accumulator = accumulator.to(compute_type)
     # -----------------------------------------------------------
     # Write back the block of the output
     offs_cn = pid_n * block_n + tl.arange(0, block_n)
-    c_ptrs = c_ptr + stride_cm * offs_token[:, None] + stride_cn * offs_cn[
-        None, :]
+    c_ptrs = c_ptr + stride_cm * offs_token[:, None] + stride_cn * offs_cn[None, :]
     c_mask = token_mask[:, None] & (offs_cn[None, :] < N)
     tl.store(c_ptrs, accumulator, mask=c_mask)
 
 
 def moe_align_block_size(
-        topk_ids: torch.Tensor, block_size: int,
-        num_experts: int) -> (torch.Tensor, torch.Tensor, torch.Tensor):
+    topk_ids: torch.Tensor, block_size: int, num_experts: int
+) -> (torch.Tensor, torch.Tensor, torch.Tensor):
     """
     Aligns the token distribution across experts to be compatible with block size for matrix multiplication.
 
@@ -163,27 +171,34 @@ def moe_align_block_size(
     - The padding ensures that the total number of tokens is now divisible by block_size for proper block matrix operations.
     """
     sorted_ids = torch.empty(
-        (topk_ids.numel() + num_experts * (block_size - 1), ),
+        (topk_ids.numel() + num_experts * (block_size - 1),),
         dtype=torch.int32,
-        device=topk_ids.device)
-    expert_ids = torch.empty((topk_ids.numel() + num_experts, ),
-                             dtype=torch.int32,
-                             device=topk_ids.device)
+        device=topk_ids.device,
+    )
+    expert_ids = torch.empty(
+        (topk_ids.numel() + num_experts,), dtype=torch.int32, device=topk_ids.device
+    )
     sorted_ids.fill_(topk_ids.numel())
-    num_tokens_post_pad = torch.empty((1),
-                                      dtype=torch.int32,
-                                      device=topk_ids.device)
-    ops.moe_align_block_size(topk_ids, num_experts, block_size, sorted_ids,
-                             expert_ids, num_tokens_post_pad)
+    num_tokens_post_pad = torch.empty((1), dtype=torch.int32, device=topk_ids.device)
+    ops.moe_align_block_size(
+        topk_ids, num_experts, block_size, sorted_ids, expert_ids, num_tokens_post_pad
+    )
     return sorted_ids, expert_ids, num_tokens_post_pad
 
 
-def invoke_fused_moe_kernel(A: torch.Tensor, B: torch.Tensor, C: torch.Tensor,
-                            topk_weights: torch.Tensor, topk_ids: torch.Tensor,
-                            sorted_token_ids: torch.Tensor,
-                            expert_ids: torch.Tensor,
-                            num_tokens_post_padded: torch.Tensor,
-                            mul_routed_weight: bool, top_k: int, config: dict):
+def invoke_fused_moe_kernel(
+    A: torch.Tensor,
+    B: torch.Tensor,
+    C: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    sorted_token_ids: torch.Tensor,
+    expert_ids: torch.Tensor,
+    num_tokens_post_padded: torch.Tensor,
+    mul_routed_weight: bool,
+    top_k: int,
+    config: dict,
+):
 
     EM = sorted_token_ids.shape[0]
     N = B.shape[1]
@@ -244,12 +259,14 @@ def invoke_fused_moe_kernel(A: torch.Tensor, B: torch.Tensor, C: torch.Tensor,
     #     print(list(fused_moe_kernel.cache[0].values())[0].asm["ptx"], file=a)
 
 
-def fused_moe(hidden_states: torch.Tensor,
-              w1: torch.Tensor,
-              w2: torch.Tensor,
-              topk_weights: torch.Tensor,
-              topk_ids: torch.Tensor,
-              inplace=False):
+def fused_moe(
+    hidden_states: torch.Tensor,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    inplace=False,
+):
     """
     This function computes a Mixture of Experts (MoE) layer using two sets of weights, w1 and w2, and top-k gating mechanism.
 
@@ -294,22 +311,28 @@ def fused_moe(hidden_states: torch.Tensor,
     #     "block_k": 128,
     # }
     # Best MMA (v2) config
-    config = {
-        "block_m": 16,
-        "block_n": 16,
-        "block_k": 256,
-    }
+    # config = {
+    #     "block_m": 16,
+    #     "block_n": 16,
+    #     "block_k": 256,
+    # }
     print(2112, config)
 
-    intermediate_cache1 = torch.empty((M, topk_ids.shape[1], N),
-                                      device=hidden_states.device,
-                                      dtype=hidden_states.dtype)
-    intermediate_cache2 = torch.empty((M * topk_ids.shape[1], N // 2),
-                                      device=hidden_states.device,
-                                      dtype=hidden_states.dtype)
-    intermediate_cache3 = torch.empty((M, topk_ids.shape[1], w2.shape[1]),
-                                      device=hidden_states.device,
-                                      dtype=hidden_states.dtype)
+    intermediate_cache1 = torch.empty(
+        (M, topk_ids.shape[1], N),
+        device=hidden_states.device,
+        dtype=hidden_states.dtype,
+    )
+    intermediate_cache2 = torch.empty(
+        (M * topk_ids.shape[1], N // 2),
+        device=hidden_states.device,
+        dtype=hidden_states.dtype,
+    )
+    intermediate_cache3 = torch.empty(
+        (M, topk_ids.shape[1], w2.shape[1]),
+        device=hidden_states.device,
+        dtype=hidden_states.dtype,
+    )
 
     sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
         topk_ids, config["block_m"], E
