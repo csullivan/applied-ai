@@ -270,16 +270,16 @@ def fused_moe(hidden_states: torch.Tensor,
     E, N, _ = w1.shape
 
     config = {
-        'block_m': 64,
-        'block_n': 64,
-        'block_k': 32,
+        "block_m": 64,
+        "block_n": 64,
+        "block_k": 256,
     }
 
     if topk_ids.numel() <= w1.shape[0]:
         config = {
-            'block_m': 16,
-            'block_n': 32,
-            'block_k': 64,
+            "block_m": 16,
+            "block_n": 32,
+            "block_k": 64,
         }
 
     # TODO(csullivan): Hardcoded config for MMAv2 FP8 (Ada)

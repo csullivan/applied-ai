@@ -73,31 +73,52 @@ def verify_fused_moe(
     w1 = torch.randn((e, 2 * n, k), device="cuda", dtype=dtype) / 10
     w2 = torch.randn((e, k, n), device="cuda", dtype=dtype) / 10
 
+    # w1_f8 = w1
+    # w2_f8 = w2
+    w1_f8 = w1.to(torch.float8_e4m3fn)
+    w2_f8 = w2.to(torch.float8_e4m3fn)
+    # w1_f8 = torch.permute(w1_f8, (0, 2, 1))
+    # w2_f8 = torch.permute(w2_f8, (0, 2, 1))
+
     score = torch.randn((m, e), device="cuda", dtype=dtype)
     score = torch.softmax(score, dim=-1)
 
     topk_weight, topk_ids = torch.topk(score, topk)
 
-    # start = time.time()
-    # triton_output_gl = fused_moe_grouped(a, w1, w2, topk_weight, topk_ids, False)
+    # TODO(csullivan): HARD CODED INDPTR
+    # indptr_np = np.array([1, 2, 4, 8, 10, 11, 14, 16])
 
-    # end = time.time()
-    # gl_time = end - start
-    # gl_time = gl_time * 1000
-    # print("Grouped Launch Time (us): ", gl_time)
+    # indptr_np = np.array([0, 0, 4, 5, 5, 9, 9, 16])
+    indptr_np = np.array([3, 4, 5, 6, 7, 10, 11, 16])
+
+    counts = np.diff(indptr_np, prepend=0)
+    topk_ids = []
+    for row, count in enumerate(counts):
+        topk_ids.extend([row] * count)
+    topk_ids = np.array(topk_ids).reshape(-1, 2)
+    topk_ids = torch.tensor(topk_ids, device="cuda")
 
     start = time.time()
-    triton_output_cm = fused_moe_col(a, w1, w2, topk_weight, topk_ids, False)
+    triton_output_gl = fused_moe_grouped(a, w1_f8, w2_f8, topk_weight, topk_ids, False)
+
+    end = time.time()
+    gl_time = end - start
+    gl_time = gl_time * 1000
+    print("Grouped Launch Time (us): ", gl_time)
+
+    start = time.time()
+    # triton_output_cm = fused_moe_col(a, w1, w2, topk_weight, topk_ids, False)
+    triton_output_cm = fused_moe_col(a, w1_f8, w2_f8, topk_weight, topk_ids, False)
     end = time.time()
     cm_major_time = end - start
     cm_major_time = cm_major_time * 1000
     print("Columm Major Time (us): ", cm_major_time)
 
     torch_base = torch_moe_first_layer(a, w1, topk_ids)
-    print(f"Torch base:\n{torch_base}")
-    print(f"Triton out:\n{triton_output_cm}")
-    # if verify:
-    #     torch.testing.assert_close(triton_output_cm, torch_base, atol=1e-2, rtol=0)
+    # print(f"Torch base:\n{torch_base}")
+    # print(f"Triton out:\n{triton_output_cm}")
+    if verify:
+        torch.testing.assert_close(triton_output_cm, torch_base, atol=1e-2, rtol=0)
 
     ggemm_out = torch.zeros(
         m, topk_ids.shape[1], w1.shape[1], dtype=a.dtype, device=a.device
@@ -107,8 +128,8 @@ def verify_fused_moe(
     sorted_token_ids = torch.arange(m, device="cuda").repeat_interleave(topk)
 
     ggemm_out = moe_via_ggemm(a, w1, ggemm_out, topk_ids)
-    # if verify:
-    #     torch.testing.assert_close(ggemm_out, torch_base, atol=1e-2, rtol=0)
+    if verify:
+        torch.testing.assert_close(ggemm_out, torch_base, atol=1e-2, rtol=0)
 
     # print(f"{triton_output_cm=}\n")
     # print(f"{triton_output_gl=}\n")
@@ -170,9 +191,9 @@ def group_gemm(A, B, indptr):
 
 
 def test_numerics():
-    verify_fused_moe(16, 14336 // 2, 4096, 8, 2, torch.float16, verify=True)
-    # for _ in range(1000):
-    #     verify_fused_moe(16, 14336 // 2, 4096, 8, 2, torch.float16, verify=False)
+    # verify_fused_moe(8, 14336 // 2, 4096, 8, 2, torch.float16, verify=True)
+    for _ in range(1000):
+        verify_fused_moe(8, 14336 // 2, 4096, 8, 2, torch.float16, verify=False)
 
 
 def test_benchmark():
@@ -218,8 +239,8 @@ def test_benchmark():
 
         quantiles = [0.5, 0.2, 0.8]
         if provider == "cm":
-            # w1_f8 = w1.to(torch.float8_e4m3fn)
-            # w2_f8 = w2.to(torch.float8_e4m3fn)
+            w1_f8 = w1.to(torch.float8_e4m3fn)
+            w2_f8 = w2.to(torch.float8_e4m3fn)
             # w1_f8 = torch.permute(w1_f8, (0, 2, 1))
             # w2_f8 = torch.permute(w2_f8, (0, 2, 1))
             ms, min_ms, max_ms = triton.testing.do_bench(
