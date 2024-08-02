@@ -60,7 +60,7 @@ def fused_moe_kernel(
     MUL_ROUTED_WEIGHT: tl.constexpr,
     top_k: tl.constexpr,
     compute_type: tl.constexpr,
-    fp8_fast_accum=False, 
+    fp8_fast_accum=False,
 ):
     """
     Implements the fused computation for a Mixture of Experts (MOE) using token and expert matrices.
@@ -191,18 +191,23 @@ def invoke_fused_moe_kernel(A: torch.Tensor, B: torch.Tensor, C: torch.Tensor,
     grid = lambda META: (
         triton.cdiv(EM, META["block_m"]) * triton.cdiv(N, META["block_n"]),
     )
-    # A = A.to(torch.float8_e4m3fn)
+    A = A.to(torch.float8_e4m3fn)
 
     compute_type = tl.float16
-    # if A.dtype == torch.bfloat16:
-    #     compute_type = tl.bfloat16
-    # elif A.dtype == torch.float8_e4m3fn:
-    #     compute_type = tl.float8e4nv
-    #     assert B.dtype == torch.float8_e4m3fn
-    # else:
-    #     raise NotImplementedError(
-    #         f"TODO(csullivan): Compute type needs to be added: {str(A.dtype)}"
-    # )
+    if A.dtype == torch.bfloat16:
+        compute_type = tl.bfloat16
+    elif A.dtype == torch.float8_e4m3fn:
+        compute_type = tl.float8e4nv
+        assert B.dtype == torch.float8_e4m3fn
+    elif A.dtype == torch.float16:
+        assert B.dtype == A.dtype
+    else:
+        import ipdb
+
+        ipdb.set_trace()
+        raise NotImplementedError(
+            f"TODO(csullivan): Compute type needs to be added: {str(A.dtype)}"
+        )
 
     fused_moe_kernel[grid](
         A,
@@ -228,7 +233,7 @@ def invoke_fused_moe_kernel(A: torch.Tensor, B: torch.Tensor, C: torch.Tensor,
         MUL_ROUTED_WEIGHT=mul_routed_weight,
         top_k=top_k,
         compute_type=compute_type,
-        fp8_fast_accum=True, 
+        fp8_fast_accum=True,
         **config,
     )
     # import ipdb
